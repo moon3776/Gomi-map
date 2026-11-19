@@ -221,20 +221,36 @@ sel.onchange=function(){
 
 // 追加：現在地が取れていれば現在地、無ければ地図の中心
 var sheet=document.getElementById("sheet");
-document.getElementById("add").onclick=function(){
-  document.getElementById("sheetTitle").textContent = myPos ? "現在地にごみ箱を追加" : "地図の中心にごみ箱を追加";
+var pending=null, tmp=null, lastPopupClose=0;
+var prevChange=sel.onchange;
+sel.onchange=function(){ prevChange(); if(tmp) tmp.setIcon(icon(sel.value)); };
+function openSheet(latlng, title){
+  pending=latlng;
+  if(tmp) tmp.setLatLng(latlng); else tmp=L.marker(latlng,{icon:icon(sel.value),opacity:.75,interactive:false}).addTo(map);
+  document.getElementById("sheetTitle").textContent=title;
   sheet.style.display="block";
+}
+function closeSheet(){ sheet.style.display="none"; pending=null; if(tmp){ map.removeLayer(tmp); tmp=null; } }
+document.getElementById("add").onclick=function(){
+  if(myPos) openSheet(myPos,"現在地にごみ箱を追加（別の場所は地図をタップ）");
+  else openSheet(map.getCenter(),"地図の中心に追加（場所は地図をタップで変更）");
 };
-document.getElementById("cancel").onclick=function(){ sheet.style.display="none"; };
+document.getElementById("cancel").onclick=closeSheet;
 document.getElementById("save").onclick=function(){
-  var c = myPos || map.getCenter(), btn=this;
+  var c = pending || myPos || map.getCenter(), btn=this;
   btn.disabled=true;
   addPin({t:sel.value, lat:+c.lat.toFixed(6), lng:+c.lng.toFixed(6), floor:document.getElementById("floor").value.trim(), note:document.getElementById("note").value})
-    .then(function(){ document.getElementById("note").value=""; document.getElementById("floor").value=""; sheet.style.display="none"; })
+    .then(function(){ document.getElementById("note").value=""; document.getElementById("floor").value=""; closeSheet(); })
     .catch(function(){ alert("追加できませんでした。通信状況、1日の上限（30件）、メモにリンクが入っていないかを確認してください。"); })
     .then(function(){ btn.disabled=false; });
 };
-map.on("click",function(){ sheet.style.display="none"; });
+// 地図をタップした場所にも追加できる（ダブルタップ拡大は誤爆するのでオフ。ピンチ操作は使えます）
+map.doubleClickZoom.disable();
+map.on("popupclose",function(){ lastPopupClose=Date.now(); });
+map.on("click",function(e){
+  if(Date.now()-lastPopupClose<400) return; // ポップアップを閉じるだけのタップは無視
+  openSheet(e.latlng,"ここにごみ箱を追加");
+});
 
 // ===== OpenStreetMap に登録済みのごみ箱・リサイクル箱を、見ている範囲だけ自動で読み込む =====
 var osmPins = [], osmSeen = {}, osmDone = {}, osmBusy = false;
