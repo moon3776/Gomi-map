@@ -4,6 +4,19 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ごみ箱マップ</title>
+<meta name="description" content="現在地の近くのごみ箱が見つかる・追加できる、みんなで作るごみ箱マップ。">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="ごみ箱マップ">
+<meta property="og:title" content="ごみ箱マップ">
+<meta property="og:description" content="現在地の近くのごみ箱が見つかる・追加できる、みんなで作るごみ箱マップ。">
+<meta property="og:url" content="https://moon3776.github.io/Gomi-map/">
+<meta property="og:image" content="https://moon3776.github.io/Gomi-map/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="ごみ箱マップ">
+<meta name="twitter:description" content="現在地の近くのごみ箱が見つかる・追加できる、みんなで作るごみ箱マップ。">
+<meta name="twitter:image" content="https://moon3776.github.io/Gomi-map/og-image.png">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.css">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.Default.css">
@@ -44,11 +57,13 @@ button.sub{background:transparent;color:var(--ink);border:1px solid var(--line);
 <div id="map"></div>
 <div id="bar">
   <span id="count"></span>
+  <button class="sub" id="here">現在地</button>
   <button class="main" id="add">現在地に追加</button>
 </div>
 <div id="sheet">
   <h2 id="sheetTitle">ごみ箱を追加</h2>
   <select id="type" aria-label="種類"></select>
+  <input id="floor" maxlength="4" placeholder="階（任意）例：1F、B1、3F" aria-label="階">
   <input id="note" maxlength="100" placeholder="メモ（例：北口改札内、自販機の横）" aria-label="メモ">
   <div class="row"><button class="sub" id="cancel" style="flex:1">やめる</button><button class="main" id="save" style="flex:2">追加する</button></div>
 </div>
@@ -65,10 +80,11 @@ var TYPES = {
   can:   {name:"缶",           color:"#d97b1c"},
   sort:  {name:"分別",         color:"#1f9d6b"},
   burn:  {name:"燃えるごみ",   color:"#7a6a5c"},
-  none:  {name:"ごみ箱なし",   color:"#d63b3b"},
+  none:  {name:"ごみ箱なし（店・駅）", color:"#d63b3b"},
   sb:    {name:"スタバ",       color:"#00704a"},
   tully: {name:"タリーズ",     color:"#8c2a2a"},
-  gong:  {name:"ごんちゃ",     color:"#c9a227"}
+  gong:  {name:"Gong cha",     color:"#c9a227"},
+  osm:   {name:"公共データ",   color:"#8a949a"}   // OpenStreetMapに登録済みのごみ箱（自動表示）
 };
 var HIDE_AT = 3; // 間違い報告がこの数に達したピンは非表示
 
@@ -93,7 +109,7 @@ function api(path, opt){
 }
 function loadPins(){
   if(ONLINE){
-    return api("pins_public?select=id,t,lat,lng,note,reports&reports=lt."+HIDE_AT+"&order=id.desc&limit=5000")
+    return api("pins_public?select=id,t,lat,lng,note,floor,reports&reports=lt."+HIDE_AT+"&order=id.desc&limit=5000")
       .then(function(rows){ pins=rows; render(); })
       .catch(function(){ document.getElementById("count").textContent="読み込みに失敗しました"; });
   }
@@ -102,7 +118,7 @@ function loadPins(){
 }
 function addPin(p){
   if(ONLINE){
-    return api("rpc/add_pin",{method:"POST",body:JSON.stringify({p_t:p.t,p_lat:p.lat,p_lng:p.lng,p_note:p.note,tok:TOKEN})})
+    return api("rpc/add_pin",{method:"POST",body:JSON.stringify({p_t:p.t,p_lat:p.lat,p_lng:p.lng,p_note:p.note,p_floor:p.floor||null,tok:TOKEN})})
       .then(function(id){ mine[id]=1; ls("gomi-mine",JSON.stringify(mine)); return loadPins(); });
   }
   p.id = Date.now(); mine[p.id]=1; ls("gomi-mine",JSON.stringify(mine));
@@ -116,7 +132,7 @@ function delPin(p){
 }
 function reportPin(p){
   reported[p.id]=1; ls("gomi-reported",JSON.stringify(reported));
-  if(ONLINE) return api("rpc/report_pin",{method:"POST",body:JSON.stringify({pin_id:p.id})});
+  if(ONLINE) return api("rpc/report_pin",{method:"POST",body:JSON.stringify({p_id:p.id,tok:TOKEN})});
   return Promise.resolve();
 }
 
@@ -136,18 +152,23 @@ function esc(s){ return String(s||"").replace(/[&<>"]/g,function(c){return {"&":
 function render(){
   cluster.clearLayers();
   var n=0;
-  pins.forEach(function(p){
-    if(!active[p.t] || !TYPES[p.t]) return;
+  pins.concat(osmPins).forEach(function(p){
+    if(!TYPES[p.t]) return;
+    // 分別ごみ箱はペットボトルも捨てられるので、「ペットボトル」を選んだときも表示する
+    var shown = active[p.t] || (p.t==="sort" && active.pet);
+    if(!shown) return;
     n++;
     var box=document.createElement("div");
-    box.innerHTML="<b>"+esc(TYPES[p.t].name)+"</b><br>"+esc(p.note);
+    box.innerHTML="<b>"+esc(TYPES[p.t].name)+"</b>"+(p.floor?" ・ <b>"+esc(p.floor)+"</b>":"")+(p.t==="sort"?' <span class="tag">ペットボトルも可</span>':"")+"<br>"+esc(p.note);
     var acts=document.createElement("div"); acts.className="acts";
-    if(mine[p.id]){
+    if(p.osm){
+      var o=document.createElement("span"); o.className="tag"; o.textContent="OpenStreetMapのデータ"; acts.appendChild(o);
+    } else if(mine[p.id]){
       var d=document.createElement("button"); d.className="sub"; d.textContent="削除";
       d.onclick=function(){ delPin(p); }; acts.appendChild(d);
     } else {
       var r=document.createElement("button"); r.className="sub";
-      r.textContent = reported[p.id] ? "報告済み" : "間違いを報告";
+      r.textContent = reported[p.id] ? "報告済み" : "なくなった・間違い";
       r.disabled = !!reported[p.id];
       r.onclick=function(){ reportPin(p); r.textContent="報告しました"; r.disabled=true; };
       acts.appendChild(r);
@@ -166,18 +187,37 @@ Object.keys(TYPES).forEach(function(k){
   b.innerHTML='<i style="background:'+TYPES[k].color+'"></i>'+TYPES[k].name;
   b.onclick=function(){ active[k]=!active[k]; b.classList.toggle("off",!active[k]); render(); };
   chips.appendChild(b);
-  var o=document.createElement("option"); o.value=k; o.textContent=TYPES[k].name; sel.appendChild(o);
+  if(k!=="osm"){ var o=document.createElement("option"); o.value=k; o.textContent=TYPES[k].name; sel.appendChild(o); }
 });
 
 // 現在地
-var me=null, myPos=null, first=true;
+var me=null, myPos=null, watching=false;
+function locMsg(t){ document.getElementById("count").textContent=t; }
 map.on("locationfound",function(e){
   myPos=e.latlng;
   if(me){ me.setLatLng(e.latlng); }
   else { me=L.circleMarker(e.latlng,{radius:8,color:"#fff",weight:3,fillColor:"#2b7bd6",fillOpacity:1}).addTo(map); }
+  if(!watching){ watching=true; map.locate({watch:true, enableHighAccuracy:true}); render(); } // 以降は地図を動かさず青い点だけ更新
 });
-map.locate({setView:true, maxZoom:16, watch:true, enableHighAccuracy:true});
-map.on("locationfound",function(){ if(first){ first=false; map.stopLocate(); map.locate({watch:true,enableHighAccuracy:true}); } });
+map.on("locationerror",function(e){
+  var denied = e.code===1;
+  locMsg(denied ? "位置情報が許可されていません。ブラウザの設定で許可してください" : "現在地を取得できませんでした。「現在地」を押してもう一度お試しください");
+});
+function goHere(){
+  if(!navigator.geolocation){ locMsg("このブラウザは位置情報に対応していません"); return; }
+  locMsg("現在地を取得中…");
+  if(watching){ if(myPos) map.setView(myPos,16); else { watching=false; map.stopLocate(); map.locate({setView:true,maxZoom:16}); } }
+  else map.locate({setView:true, maxZoom:16});
+}
+document.getElementById("here").onclick=goHere;
+goHere();
+
+// 「ごみ箱なし」を選んだら、店名を書くよう案内する
+sel.onchange=function(){
+  document.getElementById("note").placeholder = sel.value==="none"
+    ? "店名など（例：セブン○○店、店内にもなし）"
+    : "メモ（例：北口改札内、自販機の横）";
+};
 
 // 追加：現在地が取れていれば現在地、無ければ地図の中心
 var sheet=document.getElementById("sheet");
@@ -189,12 +229,50 @@ document.getElementById("cancel").onclick=function(){ sheet.style.display="none"
 document.getElementById("save").onclick=function(){
   var c = myPos || map.getCenter(), btn=this;
   btn.disabled=true;
-  addPin({t:sel.value, lat:+c.lat.toFixed(6), lng:+c.lng.toFixed(6), note:document.getElementById("note").value})
-    .then(function(){ document.getElementById("note").value=""; sheet.style.display="none"; })
-    .catch(function(){ alert("追加に失敗しました。通信状況を確認してください。"); })
+  addPin({t:sel.value, lat:+c.lat.toFixed(6), lng:+c.lng.toFixed(6), floor:document.getElementById("floor").value.trim(), note:document.getElementById("note").value})
+    .then(function(){ document.getElementById("note").value=""; document.getElementById("floor").value=""; sheet.style.display="none"; })
+    .catch(function(){ alert("追加できませんでした。通信状況、1日の上限（30件）、メモにリンクが入っていないかを確認してください。"); })
     .then(function(){ btn.disabled=false; });
 };
 map.on("click",function(){ sheet.style.display="none"; });
+
+// ===== OpenStreetMap に登録済みのごみ箱・リサイクル箱を、見ている範囲だけ自動で読み込む =====
+var osmPins = [], osmSeen = {}, osmDone = {}, osmBusy = false;
+function classify(tags){
+  if(tags["recycling:plastic_bottles"]==="yes") return "pet";
+  if(tags["recycling:cans"]==="yes") return "can";
+  if(tags.amenity==="recycling") return "sort";
+  return "osm";
+}
+function levelText(l){
+  if(l===undefined||l==="") return "";
+  var n=Number(l); if(isNaN(n)) return String(l).slice(0,4);
+  return n<0 ? "B"+(-n) : (n+1)+"F"; // OSMのlevel=0は地上階（日本の1F）
+}
+function loadOsm(){
+  if(map.getZoom()<15 || osmBusy) return;
+  var b = map.getBounds().pad(0.2);
+  var s=Math.floor(b.getSouth()*100)/100, w=Math.floor(b.getWest()*100)/100,
+      n=Math.ceil(b.getNorth()*100)/100,  e=Math.ceil(b.getEast()*100)/100;
+  var key=[s,w,n,e].join(",");
+  if(osmDone[key] || (n-s)>0.08 || (e-w)>0.08) return;
+  osmBusy=true;
+  var q='[out:json][timeout:20];(node["amenity"="waste_basket"]('+s+','+w+','+n+','+e+');node["amenity"="recycling"]('+s+','+w+','+n+','+e+'););out body 1000;';
+  fetch("https://overpass-api.de/api/interpreter",{method:"POST",body:"data="+encodeURIComponent(q),headers:{"Content-Type":"application/x-www-form-urlencoded"}})
+    .then(function(r){ if(!r.ok) throw new Error(r.status); return r.json(); })
+    .then(function(j){
+      osmDone[key]=1;
+      (j.elements||[]).forEach(function(el){
+        if(osmSeen[el.id]) return; osmSeen[el.id]=1;
+        var tags=el.tags||{};
+        osmPins.push({id:"osm"+el.id, t:classify(tags), lat:el.lat, lng:el.lon, note:tags.description||tags.name||"", floor:levelText(tags.level), osm:true});
+      });
+      render();
+    })
+    .catch(function(){})
+    .then(function(){ osmBusy=false; });
+}
+map.on("moveend",loadOsm);
 
 loadPins();
 </script>
